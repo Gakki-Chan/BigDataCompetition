@@ -250,6 +250,8 @@ class EdgeModel:
 
     def predict_scores(self, pack, threshold=0.5):
         fx, meta = self.features(pack)
+        if len(meta) == 0:
+            return {}
         p = self.clf.predict_proba(fx)[:, 1]
         return {(a, b): float(w) for (a, b), w in zip(meta, p) if w >= threshold}
 

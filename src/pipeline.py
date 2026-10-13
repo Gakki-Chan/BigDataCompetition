@@ -11,7 +11,7 @@ from typing import Dict, List, Optional
 from answer import AnswerBank
 from chain import PackContext, anchors_of, build_graph, candidate_features, generate_candidates
 from models import AbstainModel, ChainRanker, ConfidenceModel, EdgeModel, IntentModel
-from schema import Pack
+from schema import Pack, materialize_events_from_docs
 from scorer import REFUSE_TEXT
 
 INTENT_TO_QTYPE = {
@@ -19,6 +19,19 @@ INTENT_TO_QTYPE = {
     "grounded_pred": "prospective",
 }
 DEFAULT_QTYPE = "retrospective"
+ALLOWED_QTYPES = ("retrospective", "prospective", "counterfactual")
+
+
+def normalize_qtype(raw, intent):
+    """提交格式只接受 retrospective / prospective / counterfactual 三值。
+
+    数据集里还有 unanswerable / fact_query 等取值，统一归到 retrospective
+    （拒答由 answer 与 confidence 判定，与该字段无关）。
+    """
+    if raw in ALLOWED_QTYPES:
+        return raw
+    mapped = INTENT_TO_QTYPE.get(intent)
+    return mapped if mapped in ALLOWED_QTYPES else DEFAULT_QTYPE
 
 
 def meta_features(pack, question, chain, graph, intent, anchor_ids, prob_abstain=0.0,
@@ -103,7 +116,7 @@ class Pipeline:
             "answer": answer,
             "evidence_chain": chain,
             "confidence": confidence,
-            "question_type": question.question_type or INTENT_TO_QTYPE.get(intent, DEFAULT_QTYPE),
+            "question_type": normalize_qtype(question.question_type, intent),
             "_intent": intent,
             "_p_abstain": p_abstain,
             "_p_extractive": p_ext,
@@ -112,5 +125,6 @@ class Pipeline:
         }
 
     def predict_pack(self, pack):
+        materialize_events_from_docs(pack)
         edge_scores = self.build_edges(pack)
         return [self.predict_one(pack, q, edge_scores) for q in pack.questions]

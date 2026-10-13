@@ -221,6 +221,34 @@ def iter_pack_dirs(root):
     return sorted(out)
 
 
+def materialize_events_from_docs(pack, head_chars=200, tail_chars=200):
+    """事件列表缺失时（任务 C），退化为"以文档为事件粒度"建图。
+
+    这是文档级事件图构建的标准兜底做法：一篇文档视为一个事件节点，节点文本取
+    标题 + 正文首尾片段（首尾覆盖导语与结论）。事件 ID 直接沿用文档 ID，
+    这样问题里出现的 `D005` 仍然能对上节点。
+    """
+    if pack.events or not pack.docs:
+        return pack
+    events = []
+    for doc_id in sorted(pack.docs):
+        text = (pack.docs[doc_id] or "").strip()
+        content = text[:head_chars]
+        if len(text) > head_chars + tail_chars:
+            content = content + " … " + text[-tail_chars:]
+        events.append(Event(
+            event_id=doc_id,
+            doc_id=doc_id,
+            event_type="",
+            trigger="",
+            args={"内容": content},
+            time="",
+            raw={},
+        ))
+    pack.events = events
+    return pack
+
+
 # --------------------------------------------------------------------------- #
 # 问题文本解析（通用：实体 ID + 括号内类型提示）
 # --------------------------------------------------------------------------- #

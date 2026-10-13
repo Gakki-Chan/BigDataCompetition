@@ -39,6 +39,8 @@ def main():
     ap.add_argument("--dev-frac", type=float, default=0.15)
     ap.add_argument("--split", default="dev", choices=["dev", "train", "test"])
     ap.add_argument("--test-root", default=os.path.join(ROOT, "赛题4", "数据集", "抽样测试集_100"))
+    ap.add_argument("--supplement", default=os.path.join(ROOT, "赛题4补充"),
+                    help="测试集B 的事件列表放在补充目录里，按相对路径合并")
     ap.add_argument("--sim-bc", type=float, default=0.5)
     ap.add_argument("--dump", default="", help="把预测写成提交 JSON 的路径")
     ap.add_argument("--cache", default="", help="预测缓存路径（存在则直接复用，跳过推理）")
@@ -84,7 +86,22 @@ def main():
     # ---- 选评估集 ----
     if args.split == "test":
         from schema import iter_pack_dirs
-        packs = [load_pack(d, with_gold=False) for d in iter_pack_dirs(args.test_root)]
+        packs = []
+        for d in iter_pack_dirs(args.test_root):
+            pack = load_pack(d, with_gold=False)
+            if not pack.events and args.supplement:
+                cand = os.path.join(args.supplement, os.path.relpath(d, args.test_root))
+                if os.path.exists(cand):
+                    sup = load_pack(cand, with_gold=False)
+                    pack.events = sup.events
+                    pack.edges = sup.edges
+                    if not pack.docs:
+                        pack.docs = sup.docs
+            packs.append(pack)
+        tiers = {}
+        for p in packs:
+            tiers[p.tier] = tiers.get(p.tier, 0) + 1
+        print("测试 pack 档位分布：%s（判定依据：有事件=已给，有边=给定因果图）" % tiers)
     else:
         packs = load_all()
         if args.limit:
