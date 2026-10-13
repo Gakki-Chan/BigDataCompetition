@@ -127,6 +127,8 @@ class PackContext:
 
 
 def anchors_of(pack, question):
+    if IGNORE_ANCHORS:
+        return []
     node_set = set(pack.event_ids)
     return [m for m in mentions(question.text) if m in node_set]
 
@@ -352,7 +354,7 @@ def candidate_features(pack, question, chain, graph, intent=None, anchor_ids=Non
     # --- 是否覆盖首事件 / 末事件 ---
     f.append(1.0 if chain and chain[0] == ctx.ids[0] else 0.0)
     f.append(1.0 if chain and chain[-1] == ctx.ids[-1] else 0.0)
-    return f
+    return mask_disabled(f)
 
 
 FEATURE_NAMES = [
@@ -366,3 +368,32 @@ FEATURE_NAMES = [
     "after_last_anchor_ratio", "all_after_last_anchor", "head_vs_last_anchor",
     "head_is_first_event", "tail_is_last_event",
 ]
+
+# 消融用：置零某组特征（不改向量长度，训练/推理两侧一致）
+DISABLED_FEATURES = set()
+# 消融用：假装"问题里没有点名任何事件 ID"（真实语料的常态）
+IGNORE_ANCHORS = False
+
+# 依赖"文档顺序/编号"的特征组——它们很大程度上是数据生成器的结构性痕迹
+ORDER_FEATURES = {
+    "idx_mono", "idx_span", "after_last_anchor_ratio", "all_after_last_anchor",
+    "head_vs_last_anchor", "head_is_first_event", "tail_is_last_event",
+    "time_mono",
+}
+# 依赖"问题里直接出现事件 ID"的特征组——真实语料里问题通常不会点名事件 ID
+ANCHOR_FEATURES = {
+    "anchor_cov", "head_first_anchor", "tail_last_anchor", "head_last_anchor",
+    "tail_first_anchor", "head_in_anchors", "tail_in_anchors",
+    "anchor_first_pos", "anchor_last_pos", "type_hint_ok",
+    "after_last_anchor_ratio", "all_after_last_anchor", "head_vs_last_anchor",
+}
+
+_FEATURE_INDEX = {name: i for i, name in enumerate(FEATURE_NAMES)}
+
+
+def mask_disabled(features):
+    for name in DISABLED_FEATURES:
+        i = _FEATURE_INDEX.get(name)
+        if i is not None and i < len(features):
+            features[i] = 0.0
+    return features

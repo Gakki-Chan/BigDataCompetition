@@ -58,8 +58,21 @@ def main():
     ap.add_argument("--sim-bc", type=float, default=0.5,
                     help="训练链排序器时把该比例 pack 当成 B/C 档（用预测边建图）")
     ap.add_argument("--limit", type=int, default=0, help="只用前 N 个 pack 快速试跑")
+    ap.add_argument("--ablate", default="", choices=["", "order", "anchor"],
+                    help="消融：置零某组特征（order=文档顺序类；anchor=问题点名事件ID类）")
     args = ap.parse_args()
     os.makedirs(args.out, exist_ok=True)
+
+    if args.ablate:
+        import chain as chain_mod
+        if args.ablate == "order":
+            chain_mod.DISABLED_FEATURES = set(chain_mod.ORDER_FEATURES)
+            print("消融：置零文档顺序类特征 %d 个" % len(chain_mod.DISABLED_FEATURES))
+        else:
+            chain_mod.DISABLED_FEATURES = set(chain_mod.ANCHOR_FEATURES)
+            chain_mod.IGNORE_ANCHORS = True
+            print("消融：置零锚点类特征 %d 个，并假装问题不点名事件 ID"
+                  % len(chain_mod.DISABLED_FEATURES))
 
     packs = load_all()
     if args.limit:
@@ -167,6 +180,9 @@ def main():
                        "config": {"abstain_threshold": 0.7, "confidence_prior": 0.7,
                                   "confidence_shrink": 0.75,
                                   "max_path_len": 8, "max_candidates": 260}}}
+    import chain as chain_mod
+    bundle["meta"]["disabled_features"] = sorted(chain_mod.DISABLED_FEATURES)
+    bundle["meta"]["ignore_anchors"] = bool(chain_mod.IGNORE_ANCHORS)
     path = os.path.join(args.out, "bundle.joblib")
     joblib.dump(bundle, path, compress=3)
     print("已保存：%s（%.1f MB）" % (path, os.path.getsize(path) / 1e6))

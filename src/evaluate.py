@@ -49,6 +49,12 @@ def main():
     args = ap.parse_args()
 
     bundle = joblib.load(args.bundle)
+    disabled = (bundle.get("meta") or {}).get("disabled_features") or []
+    if disabled or (bundle.get("meta") or {}).get("ignore_anchors"):
+        import chain as chain_mod
+        chain_mod.DISABLED_FEATURES = set(disabled)
+        chain_mod.IGNORE_ANCHORS = bool((bundle.get("meta") or {}).get("ignore_anchors"))
+        print("按 bundle 设定置零特征：%s" % disabled)
     pipe = Pipeline(bundle["intent"], bundle["abstain"], bundle["ranker"], bundle["edge"],
                     bundle["confidence"], bundle["answers"])
     cfg = (bundle.get("meta") or {}).get("config") or {}
