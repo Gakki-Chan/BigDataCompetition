@@ -13,6 +13,7 @@ env/
 
 # --- 训练/推理产物 ---
 outputs/
+artifacts/
 runs/
 checkpoints/
 weights/
