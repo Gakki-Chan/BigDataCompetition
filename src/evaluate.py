@@ -46,22 +46,37 @@ def main():
                     help="模拟任务B：抽掉给定因果边，只用事件列表 + 预测边建图")
     ap.add_argument("--limit", type=int, default=0)
     ap.add_argument("--abstain-threshold", type=float, default=-1.0)
+    ap.add_argument("--extractive-threshold", type=float, default=-1.0)
     args = ap.parse_args()
 
     bundle = joblib.load(args.bundle)
     disabled = (bundle.get("meta") or {}).get("disabled_features") or []
-    if disabled or (bundle.get("meta") or {}).get("ignore_anchors"):
+    linker_cfg = (bundle.get("meta") or {}).get("linker") or {}
+    if disabled or (bundle.get("meta") or {}).get("ignore_anchors") or bundle.get("linker"):
         import chain as chain_mod
         chain_mod.DISABLED_FEATURES = set(disabled)
         chain_mod.IGNORE_ANCHORS = bool((bundle.get("meta") or {}).get("ignore_anchors"))
-        print("按 bundle 设定置零特征：%s" % disabled)
+        if bundle.get("linker") is not None and linker_cfg.get("enabled", True):
+            chain_mod.LINKER = bundle["linker"]
+            chain_mod.LINKER_THRESHOLD = linker_cfg.get("threshold", 0.5)
+            chain_mod.LINKER_TOPK = linker_cfg.get("topk", 3)
+            print("已启用事件提及链接器：阈值 %.2f，topk %d"
+                  % (chain_mod.LINKER_THRESHOLD, chain_mod.LINKER_TOPK))
+        if disabled:
+            print("按 bundle 设定置零特征：%s" % disabled)
     pipe = Pipeline(bundle["intent"], bundle["abstain"], bundle["ranker"], bundle["edge"],
-                    bundle["confidence"], bundle["answers"])
+                    bundle["confidence"], bundle["answers"],
+                    style_router=bundle.get("style_router"),
+                    extractive=bundle.get("extractive"))
     cfg = (bundle.get("meta") or {}).get("config") or {}
     if cfg:
         pipe.abstain_threshold = cfg.get("abstain_threshold", pipe.abstain_threshold)
         pipe.confidence_prior = cfg.get("confidence_prior", pipe.confidence_prior)
         pipe.confidence_shrink = cfg.get("confidence_shrink", pipe.confidence_shrink)
+        pipe.extractive_threshold = cfg.get("extractive_threshold",
+                                           pipe.extractive_threshold)
+    if args.extractive_threshold >= 0:
+        pipe.extractive_threshold = args.extractive_threshold
     if args.abstain_threshold >= 0:
         pipe.abstain_threshold = args.abstain_threshold
     scorer = Scorer()

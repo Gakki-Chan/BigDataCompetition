@@ -34,7 +34,8 @@ def meta_features(pack, question, chain, graph, intent, anchor_ids, prob_abstain
 
 class Pipeline:
     def __init__(self, intent, abstain, ranker, edge, confidence, answers,
-                 abstain_threshold=0.7, confidence_prior=0.7, confidence_shrink=0.75):
+                 abstain_threshold=0.7, confidence_prior=0.7, confidence_shrink=0.75,
+                 style_router=None, extractive=None, extractive_threshold=0.5):
         self.intent = intent
         self.abstain = abstain
         self.ranker = ranker
@@ -44,6 +45,9 @@ class Pipeline:
         self.abstain_threshold = abstain_threshold
         self.confidence_prior = confidence_prior
         self.confidence_shrink = confidence_shrink
+        self.style_router = style_router
+        self.extractive = extractive
+        self.extractive_threshold = extractive_threshold
 
     def build_edges(self, pack):
         """A 档直接用给定边；B/C 档用学习到的边分类器重建图。"""
@@ -72,6 +76,7 @@ class Pipeline:
         chain = list(cands[best]) if len(cands) else []
 
         abstain = p_abstain >= self.abstain_threshold
+        answer_tpl, answer_ext, p_ext = "", "", 0.0
         if abstain:
             chain, confidence, answer = [], None, REFUSE_TEXT
         else:
@@ -83,7 +88,15 @@ class Pipeline:
             confidence = self.confidence_prior + self.confidence_shrink * (
                 raw - self.confidence_prior)
             type_of = {e.event_id: e.event_type for e in pack.events}
-            answer = self.answers.compose(question.text, intent, chain, type_of, abstain=False)
+            answer_tpl = self.answers.compose(question.text, intent, chain, type_of,
+                                              abstain=False)
+            p_ext = 0.0
+            answer_ext = ""
+            if self.extractive is not None:
+                answer_ext = self.extractive.answer(pack, question, focus_events=set(chain))
+            if self.style_router is not None and self.extractive is not None:
+                p_ext = self.style_router.prob_extractive(question.text)
+            answer = answer_ext if p_ext >= self.extractive_threshold else answer_tpl
 
         return {
             "sample_id": question.sample_id,
@@ -93,6 +106,9 @@ class Pipeline:
             "question_type": question.question_type or INTENT_TO_QTYPE.get(intent, DEFAULT_QTYPE),
             "_intent": intent,
             "_p_abstain": p_abstain,
+            "_p_extractive": p_ext,
+            "_answer_templated": answer_tpl,
+            "_answer_extractive": answer_ext,
         }
 
     def predict_pack(self, pack):

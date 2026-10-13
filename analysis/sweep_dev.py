@@ -18,6 +18,7 @@ from scorer import REFUSE_TEXT, Scorer  # noqa: E402
 
 path = sys.argv[1] if len(sys.argv) > 1 else os.path.join(
     ROOT, "artifacts", "l0", "pred_dev_noabstain.json")
+EXTRACTIVE_THRESHOLD = 0.5
 preds = {p["sample_id"]: p for p in json.load(open(path, encoding="utf-8"))["preds"]}
 
 # 收集 (gold, tier, p_abstain, chain, answer, conf)
@@ -30,18 +31,23 @@ for d in iter_pack_dirs(os.path.join(ROOT, "赛题4", "数据集", "训练集"))
         if g is None or p is None:
             continue
         items.append((g, pack.tier, p.get("_p_abstain", 0.0), p["evidence_chain"],
-                      p["answer"], p["confidence"], p.get("_intent", "")))
+                      p["answer"], p["confidence"], p.get("_intent", ""),
+                      p.get("_p_extractive", 0.0), p.get("_answer_templated", ""),
+                      p.get("_answer_extractive", "")))
 print("参与扫参的题目：%d" % len(items))
 
 
 def run(threshold, conf_fn):
     scorer = Scorer()
     records = []
-    for g, tier, p_ab, chain, answer, conf, _intent in items:
+    for (g, tier, p_ab, chain, answer, conf, _intent, p_ext,
+         ans_tpl, ans_ext) in items:
         if p_ab >= threshold:
             pred = {"answer": REFUSE_TEXT, "evidence_chain": [], "confidence": None}
         else:
-            pred = {"answer": answer, "evidence_chain": chain,
+            use_ext = p_ext >= EXTRACTIVE_THRESHOLD
+            pred = {"answer": (ans_ext if use_ext else ans_tpl) or answer,
+                    "evidence_chain": chain,
                     "confidence": conf_fn(conf)}
         records.append(dict({"tier": tier}, **scorer.score_one(pred, g)))
     return scorer.aggregate(records)
@@ -58,16 +64,33 @@ conf_ops = {
     "恒0.7": lambda c: 0.7,
 }
 
-print("\n%-18s %-8s %8s %8s %8s %8s" % ("置信度映射", "拒答阈值", "答案", "证据链", "置信度", "总分"))
+print("\n=== 作答风格阈值扫描（拒答阈值固定 0.7，置信度用收缩 75%）===")
+print("%-10s %8s %8s %8s %8s" % ("抽取阈值", "答案", "证据链", "置信度", "总分"))
+best_ext = None
+for ext_t in [0.0, 0.2, 0.3, 0.4, 0.5, 0.6, 0.7, 0.9, 1.01]:
+    EXTRACTIVE_THRESHOLD = ext_t
+    globals()["EXTRACTIVE_THRESHOLD"] = ext_t
+    agg = run(0.7, conf_ops["向0.7收缩75%"])
+    print("%-10.2f %8.2f %8.2f %8.2f %8.2f"
+          % (ext_t, agg["ALL_answer"], agg["ALL_chain"], agg["ALL_confidence"],
+             agg["weighted"]))
+    if best_ext is None or agg["weighted"] > best_ext[0]:
+        best_ext = (agg["weighted"], ext_t)
+
+print("\n=== 联合扫描（最优抽取阈值下）===")
+globals()["EXTRACTIVE_THRESHOLD"] = best_ext[1]
+print("%-18s %-8s %8s %8s %8s %8s"
+      % ("置信度映射", "拒答阈值", "答案", "证据链", "置信度", "总分"))
 best = None
 for name, fn in conf_ops.items():
     for t in [0.5, 0.6, 0.7, 0.8]:
         agg = run(t, fn)
-        row = (agg["weighted"], name, t, agg)
+        row = (agg["weighted"], name, t)
         if best is None or row[0] > best[0]:
             best = row
         print("%-18s %-8.2f %8.2f %8.2f %8.2f %8.2f"
               % (name, t, agg["ALL_answer"], agg["ALL_chain"], agg["ALL_confidence"],
                  agg["weighted"]))
 
-print("\n最优：%s，阈值 %.2f，总分 %.2f" % (best[1], best[2], best[0]))
+print("\n最优：抽取阈值 %.2f，%s，拒答阈值 %.2f，总分 %.2f"
+      % (best_ext[1], best[1], best[2], best[0]))

@@ -129,6 +129,9 @@ class PackContext:
 def anchors_of(pack, question):
     if IGNORE_ANCHORS:
         return []
+    if LINKER is not None:
+        from linking import combined_anchors
+        return combined_anchors(pack, question, LINKER, LINKER_THRESHOLD, LINKER_TOPK)
     node_set = set(pack.event_ids)
     return [m for m in mentions(question.text) if m in node_set]
 
@@ -373,6 +376,11 @@ FEATURE_NAMES = [
 DISABLED_FEATURES = set()
 # 消融用：假装"问题里没有点名任何事件 ID"（真实语料的常态）
 IGNORE_ANCHORS = False
+
+# 事件提及链接器（训练脚本注入）。为 None 时退化为"只认问题里出现的 D-id"。
+LINKER = None
+LINKER_THRESHOLD = 0.5
+LINKER_TOPK = 3
 
 # 依赖"文档顺序/编号"的特征组——它们很大程度上是数据生成器的结构性痕迹
 ORDER_FEATURES = {

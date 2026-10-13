@@ -103,19 +103,13 @@ class ChainRanker:
         return list(np.argsort(-s))
 
 
-class MoEChainRanker:
-    """按（预测的）意图分流到不同排序器——模型层面的混合专家，不是规则分支。
-
-    候选特征里"形状"与"意图"的耦合很强（例如同一组特征在单跳题和多跳题里的最优
-    选择不同），让每个意图拥有自己的排序器能显著提升 top-1 准确率。
-    """
-
+class MoEBase:
     MIN_SAMPLES = 300
 
-    def __init__(self, **kw):
-        self.kw = kw
+    def __init__(self, base_factory):
+        self.base_factory = base_factory
         self.rankers = {}
-        self.global_ranker = ChainRanker()
+        self.global_ranker = base_factory()
 
     def fit(self, X, y, intents):
         self.global_ranker.fit(X, y)
@@ -125,8 +119,8 @@ class MoEChainRanker:
             by_intent[it][0].append(row)
             by_intent[it][1].append(lab)
         for it, (xs, ys) in by_intent.items():
-            if len(ys) >= self.MIN_SAMPLES and sum(ys) >= 10:
-                self.rankers[it] = ChainRanker().fit(xs, ys)
+            if len(ys) >= self.MIN_SAMPLES and sum(1 for v in ys if v > 0) >= 10:
+                self.rankers[it] = self.base_factory().fit(xs, ys)
         return self
 
     def score(self, X, intent=None):
@@ -134,6 +128,52 @@ class MoEChainRanker:
         if r is not None:
             return r.score(X)
         return self.global_ranker.score(X)
+
+
+class MoEChainRanker(MoEBase):
+    """按（预测的）意图分流到不同排序器——模型层面的混合专家，不是规则分支。
+
+    候选特征里"形状"与"意图"的耦合很强（例如同一组特征在单跳题和多跳题里的最优
+    选择不同），让每个意图拥有自己的排序器能显著提升 top-1 准确率。
+    """
+
+    def __init__(self, **kw):
+        MoEBase.__init__(self, ChainRanker)
+        self.kw = kw
+
+
+class MoESoftChainRanker(MoEBase):
+    """软标签版本：目标对齐评测口径（部分分），见 SoftLabelChainRanker。"""
+
+    def __init__(self, **kw):
+        MoEBase.__init__(self, SoftLabelChainRanker)
+        self.kw = kw
+
+
+class SoftLabelChainRanker:
+    """多示例软标签排序器。
+
+    标准答案给了多条**可接受**证据链，评测也是"取最高分那条标准链比较"，且按节点
+    F1 给部分分。所以候选不应该只有 0/1 标签：用"与最好那条金标链的对齐程度"作为
+    连续目标（0.625·节点F1 + 0.375·顺序分，与 25/15 的配分一致），直接对齐评测口径。
+    这是多示例学习（Dietterich et al., 1997）在链级监督上的自然形式。
+    """
+
+    def __init__(self):
+        from sklearn.ensemble import GradientBoostingRegressor
+        self.clf = GradientBoostingRegressor(n_estimators=260, max_depth=3,
+                                             learning_rate=0.12, subsample=0.9,
+                                             random_state=0)
+
+    def fit(self, X, y):
+        self.clf.fit(np.asarray(X, dtype=float), np.asarray(y, dtype=float))
+        return self
+
+    def score(self, X):
+        X = np.asarray(X, dtype=float)
+        if len(X) == 0:
+            return np.zeros(0)
+        return self.clf.predict(X)
 
 
 class EdgeModel:
