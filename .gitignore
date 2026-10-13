@@ -1,0 +1,35 @@
+# --- 原始赛题数据（体积大、可由赛方渠道重新获取，默认不入库）---
+赛题4/
+赛题4补充/
+
+# --- Python ---
+__pycache__/
+*.py[cod]
+*.egg-info/
+.ipynb_checkpoints/
+.venv/
+venv/
+env/
+
+# --- 训练/推理产物 ---
+outputs/
+runs/
+checkpoints/
+weights/
+*.ckpt
+*.safetensors
+*.bin
+*.pt
+*.pth
+
+# --- 提交与缓存 ---
+submissions/
+*.log
+.cache/
+.pytest_cache/
+
+# --- 编辑器/系统 ---
+.idea/
+.vscode/
+.DS_Store
+Thumbs.db
