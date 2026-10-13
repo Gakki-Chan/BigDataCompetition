@@ -48,7 +48,8 @@ def meta_features(pack, question, chain, graph, intent, anchor_ids, prob_abstain
 class Pipeline:
     def __init__(self, intent, abstain, ranker, edge, confidence, answers,
                  abstain_threshold=0.7, confidence_prior=0.7, confidence_shrink=0.75,
-                 style_router=None, extractive=None, extractive_threshold=0.5):
+                 style_router=None, extractive=None, extractive_threshold=0.5,
+                 correctness=None):
         self.intent = intent
         self.abstain = abstain
         self.ranker = ranker
@@ -61,6 +62,7 @@ class Pipeline:
         self.style_router = style_router
         self.extractive = extractive
         self.extractive_threshold = extractive_threshold
+        self.correctness = correctness
 
     def build_edges(self, pack):
         """A 档直接用给定边；B/C 档用学习到的边分类器重建图。"""
@@ -89,20 +91,24 @@ class Pipeline:
         chain = list(cands[best]) if len(cands) else []
 
         abstain = p_abstain >= self.abstain_threshold
-        answer_tpl, answer_ext, p_ext = "", "", 0.0
+        answer_tpl, answer_ext, p_ext, mf = "", "", 0.0, None
         if abstain:
             chain, confidence, answer = [], None, REFUSE_TEXT
         else:
             mf = meta_features(pack, question, chain, graph, intent, anchor_ids, p_abstain,
                                ctx=ctx)
-            raw = float(self.confidence.predict_value([mf])[0])
-            # 向先验收缩：dev 实测置信度模型的排序能力弱于"恒输出 probable"，
-            # 收缩系数在 dev 上扫过（0.75 与 1.0 的差距在噪声内），保留部分模型信号。
-            confidence = self.confidence_prior + self.confidence_shrink * (
-                raw - self.confidence_prior)
+            if self.correctness is not None:
+                # 置信度 = 预测的期望答案正确率（平方损失下的条件最优解）
+                confidence = float(self.correctness.predict_value([mf])[0])
+            else:
+                raw = float(self.confidence.predict_value([mf])[0])
+                confidence = self.confidence_prior + self.confidence_shrink * (
+                    raw - self.confidence_prior)
             type_of = {e.event_id: e.event_type for e in pack.events}
+            node_text = {e.event_id: (e.event_type + e.trigger + (e.args.get("影响") or ""))
+                         for e in pack.events}
             answer_tpl = self.answers.compose(question.text, intent, chain, type_of,
-                                              abstain=False)
+                                              abstain=False, node_text=node_text)
             p_ext = 0.0
             answer_ext = ""
             if self.extractive is not None:
@@ -122,6 +128,7 @@ class Pipeline:
             "_p_extractive": p_ext,
             "_answer_templated": answer_tpl,
             "_answer_extractive": answer_ext,
+            "_meta_features": (list(mf) if not abstain else None),
         }
 
     def predict_pack(self, pack):

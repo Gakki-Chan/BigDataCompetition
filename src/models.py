@@ -289,6 +289,45 @@ class ConfidenceModel:
         return out
 
 
+class CorrectnessRegressor:
+    """置信度 = 预测的期望答案正确率 E[c | 特征]。
+
+    评测的置信度项是 20·(1-(conf-c)^2)，属于平方损失（Brier 分数，proper scoring
+    rule），其条件最优解就是 conf* = E[c|特征]。所以不该去分类数据集标注的
+    certain/probable/possible，而应**直接回归答案正确率**。
+
+    训练数据必须是"诚实的"预测（在模型没见过的 pack 上跑出来的），否则模型会学到
+    "我永远是对的"。所以这个回归器在训练流程的最后、用留出的 dev 折来拟合，
+    相当于一个校准集（calibration set）。
+    """
+
+    LO, HI = 0.05, 0.98
+
+    def __init__(self):
+        from sklearn.ensemble import GradientBoostingRegressor
+        self.reg = GradientBoostingRegressor(n_estimators=200, max_depth=2,
+                                             learning_rate=0.05, subsample=0.8,
+                                             random_state=0)
+        self.fitted = False
+        self.base = 0.7
+
+    def fit(self, X, y):
+        X = np.asarray(X, dtype=float)
+        if len(y) >= 100:
+            self.reg.fit(X, np.asarray(y, dtype=float))
+            self.fitted = True
+            self.base = float(np.mean(y))
+        return self
+
+    def predict_value(self, X):
+        X = np.asarray(X, dtype=float)
+        if len(X) == 0:
+            return []
+        if not self.fitted:
+            return [self.base] * len(X)
+        return list(np.clip(self.reg.predict(X), self.LO, self.HI))
+
+
 def _days(a, b):
     import datetime
     import re as _re

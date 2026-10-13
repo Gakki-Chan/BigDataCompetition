@@ -22,8 +22,8 @@ from chain import (PackContext, anchors_of, build_graph, candidate_features,
 from linking import MentionLinker, weak_anchor_labels
 from extractive import AnswerStyleRouter, ExtractiveAnswerer
 from labels import hard_label, soft_label
-from models import (AbstainModel, ConfidenceModel, EdgeModel, IntentModel,
-                    MoEChainRanker, MoESoftChainRanker)
+from models import (AbstainModel, ConfidenceModel, CorrectnessRegressor, EdgeModel,
+                    IntentModel, MoEChainRanker, MoESoftChainRanker)
 from pipeline import meta_features
 from schema import iter_pack_dirs, load_pack
 
@@ -213,10 +213,35 @@ def main():
           % (router.n_extractive, router.n_total, time.time() - t0))
     extractive = ExtractiveAnswerer()
 
+    # ---------------- 7. 置信度校准（用留出的 dev 折做校准集） ----------------
+    # 置信度项的评测式子是 20·(1-(conf-c)^2)，最优解是 conf = E[c|特征]，
+    # 所以直接回归"答案正确率"。训练数据必须是模型没见过的 pack（否则会学到
+    # "我永远是对的"），因此这一步放在最后、用 dev 折跑一遍真实推理来构造。
+    t0 = time.time()
+    from pipeline import Pipeline
+    from scorer import Scorer
+    calib_pipe = Pipeline(intent, abstain, ranker, edge, confidence, bank,
+                          style_router=router, extractive=extractive)
+    calib_pipe.extractive_threshold = 1.01        # 抽取式默认关闭
+    scorer = Scorer()
+    Xc, yc = [], []
+    for pack in dev_packs:
+        for pred, q in zip(calib_pipe.predict_pack(pack), pack.questions):
+            g = pack.gold.get(q.sample_id)
+            mf = pred.get("_meta_features")
+            if g is None or not mf or pred["confidence"] is None:
+                continue
+            Xc.append(mf)
+            yc.append(scorer.score_answer(pred["answer"], g)["score"] / 40.0)
+    correctness = CorrectnessRegressor().fit(Xc, yc)
+    print("置信度校准：%d 个样本，平均答案正确率 %.3f（%.1fs）"
+          % (len(yc), (sum(yc) / len(yc)) if yc else 0.0, time.time() - t0))
+
     # ---------------- 保存 ----------------
     bundle = {"intent": intent, "abstain": abstain, "ranker": ranker, "edge": edge,
               "confidence": confidence, "answers": bank, "linker": linker,
               "style_router": router, "extractive": extractive,
+              "correctness": correctness,
               "meta": {"dev_packs": [p.name for p in dev_packs],
                        "n_train_packs": len(train_packs),
                        "config": {"abstain_threshold": 0.7, "confidence_prior": 0.7,

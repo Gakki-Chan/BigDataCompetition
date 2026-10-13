@@ -69,7 +69,8 @@ def main():
     pipe = Pipeline(bundle["intent"], bundle["abstain"], bundle["ranker"], bundle["edge"],
                     bundle["confidence"], bundle["answers"],
                     style_router=bundle.get("style_router"),
-                    extractive=bundle.get("extractive"))
+                    extractive=bundle.get("extractive"),
+                    correctness=bundle.get("correctness"))
     cfg = (bundle.get("meta") or {}).get("config") or {}
     if cfg:
         pipe.abstain_threshold = cfg.get("abstain_threshold", pipe.abstain_threshold)
