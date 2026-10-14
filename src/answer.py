@@ -44,14 +44,20 @@ class AnswerBank:
     use_assignment = True
     pos_weight = 0.25
 
-    def __init__(self, id_pattern=EVENT_ID_RE, topk=8, align_lambda=0.6,
-                 use_assignment=True, pos_weight=0.25):
+    # 类级默认值：兼容旧 pickle
+    align_mode = "positional"
+    gap_cost = 0.5
+    align_lambda = 0.0
+
+    def __init__(self, id_pattern=EVENT_ID_RE, topk=8, align_lambda=0.0,
+                 align_mode="positional", pos_weight=0.25, gap_cost=0.5):
         self.entries: List[Dict] = []
         self.id_pattern = id_pattern
         self.topk = topk
         self.align_lambda = align_lambda
-        self.use_assignment = use_assignment
+        self.align_mode = align_mode
         self.pos_weight = pos_weight
+        self.gap_cost = gap_cost
 
     # ------------------------------------------------------------------ #
     def add_pack(self, pack):
@@ -94,15 +100,24 @@ class AnswerBank:
 
     # ------------------------------------------------------------------ #
     def _align(self, entry, chain, node_text):
-        """模板槽位 -> 预测链节点 的最小代价一一指派（线性指派问题）。"""
+        """模板槽位 -> 预测链节点 的对齐。
+
+        关键：证据链是**有序序列**，所以对齐必须是**单调**的（保序）。
+        用最小代价一一指派（Hungarian）会允许任意置换，实测会把因果方向调转、
+        让答案与证据链自相矛盾（dev 上"与金标同向"从 0.565 掉到 0.526）。
+        有序结构对应的是**单调序列对齐**，用动态规划求解（Needleman-Wunsch 家族）。
+        """
         slots = entry.get("slots") or extract_slots(entry.get("answer", ""), self.id_pattern)
         if not slots or not chain:
-            return {}, 0.0
-        if not self.use_assignment:
+            return {}, 0.0, set()
+        mode = getattr(self, "align_mode", "monotone")
+        if mode == "positional":
             mapping = {slots[i][0]: chain[i] for i in range(min(len(slots), len(chain)))}
-            return mapping, 0.0
-
-        from scipy.optimize import linear_sum_assignment
+            excess = {slots[i][0] for i in range(len(chain), len(slots))}
+            # 位置映射天然保序（与提交的证据链 100% 一致），唯一缺陷是模板槽位
+            # 多于链节点时会残留外来 ID，这里补齐映射把那个缺陷去掉。
+            mapping = self._fill_unmatched(slots, chain, mapping)
+            return mapping, 0.0, excess
 
         n_s, n_c = len(slots), len(chain)
         cost = np.zeros((n_s, n_c), dtype=float)
@@ -116,24 +131,119 @@ class AnswerBank:
                 pos_s = i / max(1, n_s - 1)
                 pos_c = j / max(1, n_c - 1)
                 cost[i, j] = (1.0 - sim) + self.pos_weight * abs(pos_s - pos_c)
-        rows, cols = linear_sum_assignment(cost)
-        mapping = {slots[i][0]: chain[j] for i, j in zip(rows, cols)}
-        return mapping, float(cost[rows, cols].mean())
+
+        if mode == "assignment":
+            from scipy.optimize import linear_sum_assignment
+            rows, cols = linear_sum_assignment(cost)
+            mapping = {slots[i][0]: chain[j] for i, j in zip(rows, cols)}
+            excess = {slots[i][0] for i in range(n_s) if i not in set(rows)}
+            mapping = self._fill_unmatched(slots, chain, mapping)
+            return mapping, float(cost[rows, cols].mean()), excess
+
+        # 单调对齐（保序）：DP，允许跳过槽位或跳过链节点，代价 = 匹配代价 + 间隔罚
+        gap = getattr(self, "gap_cost", 0.5)
+        INF = float("inf")
+        dp = [[INF] * (n_c + 1) for _ in range(n_s + 1)]
+        back = [[None] * (n_c + 1) for _ in range(n_s + 1)]
+        dp[0][0] = 0.0
+        for i in range(n_s + 1):
+            for j in range(n_c + 1):
+                if dp[i][j] == INF:
+                    continue
+                if i < n_s and j < n_c:
+                    v = dp[i][j] + cost[i, j]
+                    if v < dp[i + 1][j + 1]:
+                        dp[i + 1][j + 1] = v
+                        back[i + 1][j + 1] = ("m", i, j)
+                if i < n_s:
+                    v = dp[i][j] + gap
+                    if v < dp[i + 1][j]:
+                        dp[i + 1][j] = v
+                        back[i + 1][j] = ("s", i, j)
+                if j < n_c:
+                    v = dp[i][j] + gap
+                    if v < dp[i][j + 1]:
+                        dp[i][j + 1] = v
+                        back[i][j + 1] = ("c", i, j)
+
+        matched = {}          # slot index -> chain index
+        i, j = n_s, n_c
+        while back[i][j] is not None:
+            kind, pi, pj = back[i][j]
+            if kind == "m":
+                matched[pi] = pj
+            i, j = pi, pj
+
+        # 未匹配的槽位：绝不留下外来 ID，一律跟着最近的已匹配邻居
+        mapping = {slots[i][0]: chain[j] for i, j in matched.items()}
+        excess = {slots[i][0] for i in range(n_s) if i not in matched}
+        mapping = self._fill_unmatched(slots, chain, mapping, matched_indices=matched)
+        total = sum(cost[i, matched[i]] for i in matched)
+        total += gap * (n_s - len(matched))
+        return mapping, total / max(1, n_s), excess
+
+    @staticmethod
+    def _fill_unmatched(slots, chain, mapping, matched_indices=None):
+        """保证每个槽位都有映射目标——否则模板里的外来事件 ID 会残留在答案里。"""
+        if not chain:
+            return mapping
+        # 已映射到的链下标（用于就近回退）
+        pos_of = {cid: k for k, cid in enumerate(chain)}
+        known = {}
+        for i, (eid, _h) in enumerate(slots):
+            if eid in mapping:
+                known[i] = pos_of.get(mapping[eid])
+        for i, (eid, _h) in enumerate(slots):
+            if eid in mapping:
+                continue
+            prev_j = max((k for k in known if k < i), default=None)
+            next_j = min((k for k in known if k > i), default=None)
+            if prev_j is not None:
+                j = known[prev_j]
+            elif next_j is not None:
+                j = known[next_j]
+            else:
+                j = min(i, len(chain) - 1)
+            mapping[eid] = chain[j]
+        return mapping
 
     # ------------------------------------------------------------------ #
-    def _substitute(self, text, mapping, type_of):
+    def _substitute(self, text, mapping, type_of, excess_ids=None):
+        """ID 替换 + 类型名改写 + 多余槽位删除。
+
+        三件事缺一件，答案里就会留下"外来事实"：
+          1. 事件 ID 换成预测链的节点；
+          2. ID 后面括号里的类型名必须换成**本 pack 中该事件的真实类型**——
+             模板的类型名属于另一个 pack，不改就会出现 "D002（司法追责）" 而本 pack
+             的 D002 是"深度报道"这种自相矛盾的表述；
+          3. 模板槽位多于链节点时，多出来的槽位整段删掉，而不是重复指向同一节点。
+        """
+        excess_ids = excess_ids or set()
+        # 先删多余槽位（必须用**替换前**的原始 ID 去找，否则已被映射成别的 ID 就找不到了）
+        for eid in sorted(excess_ids, key=len, reverse=True):
+            text = re.sub(re.escape(eid) + r"\s*[（(][^）)]*[）)]\s*[、,，]?", "", text)
+            text = re.sub(re.escape(eid) + r"\s*[、,，]?", "", text)
         if mapping:
             text = self.id_pattern.sub(lambda m: mapping.get(m.group(0), m.group(0)), text)
 
-        def _fix_paren(m):
-            inner = m.group(1)
-            ids = self.id_pattern.findall(inner)
-            if not ids:
-                return m.group(0)
-            target = type_of.get(ids[0])
-            return "（%s）" % target if target else m.group(0)
+        id_then_paren = re.compile(r"(%s)\s*[（(]([^）)]*)[）)]" % EVENT_ID_RE.pattern)
 
-        return PAREN_RE.sub(_fix_paren, text)
+        def _fix(m):
+            eid = m.group(1)
+            target = type_of.get(eid)
+            return "%s（%s）" % (eid, target) if target else m.group(0)
+
+        text = id_then_paren.sub(_fix, text)
+
+        # 安全网：任何不属于本 pack 的事件 ID 都不允许留在答案里（模板残留）
+        valid = set(type_of)
+        stray = [x for x in dict.fromkeys(self.id_pattern.findall(text)) if x not in valid]
+        for eid in sorted(stray, key=len, reverse=True):
+            text = re.sub(re.escape(eid) + r"\s*[（(][^）)]*[）)]\s*[、,，]?", "", text)
+            text = re.sub(re.escape(eid) + r"\s*[、,，]?", "", text)
+        text = re.sub(r"[、,，]{2,}", "、", text)
+        text = re.sub(r"[、,，]\s*([；;。])", r"\1", text)
+        return text
 
     # ------------------------------------------------------------------ #
     def compose(self, qtext, intent, chain, type_of, abstain=False, node_text=None):
@@ -146,9 +256,9 @@ class AnswerBank:
             return REFUSE_TEXT
         best_text, best_score = None, None
         for base, entry in cands:
-            mapping, cost = self._align(entry, chain, node_text)
+            mapping, cost, excess = self._align(entry, chain, node_text)
             total = base - self.align_lambda * cost
             if best_score is None or total > best_score:
                 best_score, best_text = total, self._substitute(
-                    entry["answer"], mapping, type_of)
+                    entry["answer"], mapping, type_of, excess)
         return best_text or REFUSE_TEXT

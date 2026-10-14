@@ -302,6 +302,18 @@ class CorrectnessRegressor:
     """
 
     LO, HI = 0.05, 0.98
+    # 代理评分器上"金标答案"只能拿到 0.775（实测 31.01/40），说明我们的正确率
+    # 估计被系统性低估。用这个上界做"评分器等价化"（equating），把代理尺度的
+    # 期望正确率折算到官方尺度上。
+    PROXY_CEILING = 0.775
+    # 折算结果仍向先验 0.7 收缩：官方尺度的真实正确率我们只能间接推断，
+    # 而线性损失下偏离真实值的代价是二次的，宁可保守。
+    PRIOR = 0.7
+    # 收缩系数取 0.25：本赛题的"正确率"只能由代理评分器度量，而代理评分器已被证明
+    # 会误导（它偏好打乱顺序的答案）。线性损失下偏离真实值的代价是二次的，因此
+    # 宁可把校准结果拉回已知可用的工作点 0.7 附近。
+    SHRINK_TO_PRIOR = 0.25
+    CLIP_LO, CLIP_HI = 0.40, 0.95
 
     def __init__(self):
         from sklearn.ensemble import GradientBoostingRegressor
@@ -325,7 +337,10 @@ class CorrectnessRegressor:
             return []
         if not self.fitted:
             return [self.base] * len(X)
-        return list(np.clip(self.reg.predict(X), self.LO, self.HI))
+        raw = np.clip(self.reg.predict(X), self.LO, self.HI)
+        equated = raw / self.PROXY_CEILING
+        hedged = self.PRIOR + self.SHRINK_TO_PRIOR * (equated - self.PRIOR)
+        return list(np.clip(hedged, self.CLIP_LO, self.CLIP_HI))
 
 
 def _days(a, b):
